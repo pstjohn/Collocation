@@ -89,6 +89,16 @@ class Collocation(BaseCollocation):
 
         self.pvar = VariableHandler(parameters)
         self.pvar.alpha_in[:] = 0.
+
+        # Create vectors from optimized time and states
+        h = self.tf / self.nk
+
+        self.fs = h * np.arange(self.nk)
+        self.tgrid = np.array(
+            [point + h*np.array(self.col_vars['tau_root']) for point in
+             np.linspace(0, self.tf, self.nk, endpoint=False)])
+        self.ts = self.tgrid.flatten()
+
         
     def _initialize_polynomial_constraints(self):
         """ Add constraints to the model to account for system dynamics and
@@ -145,15 +155,6 @@ class Collocation(BaseCollocation):
 
 
     def _plot_setup(self):
-
-        # Create vectors from optimized time and states
-        h = self.tf / self.nk
-
-        self.fs = h * np.arange(self.nk)
-        self.ts = np.array(
-            [point + h*np.array(self.col_vars['tau_root']) for point in 
-             np.linspace(0, self.tf, self.nk,
-                         endpoint=False)]).flatten()
 
         self.sol = self.var.x_op.reshape((self.nk*(self.d+1)), self.nx)
 
@@ -213,6 +214,11 @@ class Collocation(BaseCollocation):
 
         self._set_objective_from_data(self.data)
 
+        # Initialize x_guess
+        for i, (x, df) in enumerate(data.iteritems()):
+            t, x = df.reset_index().dropna().values.T
+            self.var.x_in[:, :, i] = np.interp(self.tgrid, t, x)
+
 
     def _set_objective_from_data(self, data):
 
@@ -234,30 +240,40 @@ class Collocation(BaseCollocation):
 
         return out
 
-    def solve_ode(self):
+    def solve_ode(self, ts=None):
         """ Solve the ODE using casadi's CVODES wrapper to ensure that the
-        collocated dynamics match the error-controlled dynamics of the ODE """
+        collocated dynamics match the error-controlled dynamics of the ODE
 
+        """
+        if ts is None:
+            ts = self.ts
+            check_err = True
+        else:
+            check_err = False
 
-        self.ts.sort() # Assert ts is increasing
+        ts.sort() # Assert ts is increasing
                                      
         integrator = cs.integrator(
             'int', 'cvodes', self._model_dict,
             {
-                'grid': self.ts,
+                'grid': ts,
                 'output_t0': True,
             })
 
 
-        x_sim = self.sol_sim = np.array(integrator(
+        x_sim = np.array(integrator(
             x0=self.sol[0], p=self.var.p_op)['xf']).T
 
-        err = ((self.sol - x_sim).mean(0) /
-               (self.sol.mean(0))).mean()
+        if check_err:
 
-        if err > 1E-3: warn(
-                'Collocation does not match ODE Solution: '
-                '{:.2%} Error'.format(err))
+            err = ((self.sol - x_sim).mean(0) /
+                   (self.sol.mean(0))).mean()
+
+            if err > 1E-3: warn(
+                    'Collocation does not match ODE Solution: '
+                    '{:.2%} Error'.format(err))
+
+        return x_sim
 
     def reset_objective(self):
         self.objective_sx = 0
